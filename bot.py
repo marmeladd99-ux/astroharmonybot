@@ -1,5 +1,6 @@
 import os
 import logging
+from datetime import datetime
 from flask import Flask, request
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -27,7 +28,7 @@ if not TOKEN:
 
 # Создаем настройки для HTTP запросов с увеличенным pool
 request_instance = HTTPXRequest(
-    connection_pool_size=20,  # Увеличиваем размер пула
+    connection_pool_size=20,
     connect_timeout=30.0,
     read_timeout=30.0,
     write_timeout=30.0,
@@ -59,6 +60,7 @@ def get_application():
             # Добавляем обработчики
             application.add_handler(CommandHandler("start", start))
             application.add_handler(CommandHandler("help", help_command))
+            application.add_handler(CommandHandler("date", date_command))
             application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
             
             # Инициализируем синхронно
@@ -85,16 +87,48 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f'Я AstroHarmony бот. Отправь мне сообщение, и я его повторю!\n\n'
         f'Команды:\n'
         f'/start - начать\n'
-        f'/help - помощь'
+        f'/help - помощь\n'
+        f'/date - показать текущую дату и время'
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        'Доступные команды:\n'
+        'Доступные команды:\n\n'
         '/start - начать работу\n'
-        '/help - показать это сообщение\n\n'
+        '/help - показать это сообщение\n'
+        '/date - показать текущую дату и время\n\n'
         'Просто напиши мне что-нибудь, и я отвечу!'
     )
+
+async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает текущую дату и время"""
+    now = datetime.now()
+    
+    # Форматируем дату
+    date_str = now.strftime('%d.%m.%Y')  # День.Месяц.Год
+    time_str = now.strftime('%H:%M:%S')  # Часы:Минуты:Секунды
+    weekday = now.strftime('%A')  # День недели
+    
+    # Переводим день недели на русский
+    weekdays_ru = {
+        'Monday': 'Понедельник',
+        'Tuesday': 'Вторник',
+        'Wednesday': 'Среда',
+        'Thursday': 'Четверг',
+        'Friday': 'Пятница',
+        'Saturday': 'Суббота',
+        'Sunday': 'Воскресенье'
+    }
+    weekday_ru = weekdays_ru.get(weekday, weekday)
+    
+    # Формируем ответ
+    response = (
+        f'📅 Сегодня: {weekday_ru}\n'
+        f'📆 Дата: {date_str}\n'
+        f'⏰ Время: {time_str}'
+    )
+    
+    await update.message.reply_text(response)
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f'Вы написали: {update.message.text}')
