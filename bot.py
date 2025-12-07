@@ -411,19 +411,31 @@ def set_webhook():
             
         webhook_url = f"{WEBHOOK_URL}/webhook"
         
-        # Получаем инициализированное приложение
-        app_instance = get_application()
-        
+        # Создаём новую корутину для установки webhook
         import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         
-        # Удаляем старый webhook
-        loop.run_until_complete(app_instance.bot.delete_webhook(drop_pending_updates=True))
+        async def setup_webhook():
+            # Получаем инициализированное приложение
+            app_instance = get_application()
+            
+            # Удаляем старый webhook
+            await app_instance.bot.delete_webhook(drop_pending_updates=True)
+            
+            # Устанавливаем новый
+            result = await app_instance.bot.set_webhook(url=webhook_url)
+            return result
         
-        # Устанавливаем новый
-        result = loop.run_until_complete(app_instance.bot.set_webhook(url=webhook_url))
-        loop.close()
+        # Запускаем в новом event loop
+        try:
+            result = asyncio.run(setup_webhook())
+        except RuntimeError:
+            # Если asyncio.run не работает, создаём новый loop
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result = loop.run_until_complete(setup_webhook())
+            finally:
+                loop.close()
         
         logger.info(f'Webhook set to {webhook_url}')
         return f'Webhook set to {webhook_url}. Result: {result}', 200
@@ -435,13 +447,23 @@ def set_webhook():
 def webhook_info():
     """Проверка статуса webhook"""
     try:
-        app_instance = get_application()
-        
         import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        info = loop.run_until_complete(app_instance.bot.get_webhook_info())
-        loop.close()
+        
+        async def get_info():
+            app_instance = get_application()
+            info = await app_instance.bot.get_webhook_info()
+            return info
+        
+        # Запускаем в новом event loop
+        try:
+            info = asyncio.run(get_info())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                info = loop.run_until_complete(get_info())
+            finally:
+                loop.close()
         
         return {
             'url': info.url,
