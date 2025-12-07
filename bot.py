@@ -157,7 +157,7 @@ async def get_compatibility_analysis(date1, date2):
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}",
+                f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}",
                 headers={
                     "Content-Type": "application/json"
                 },
@@ -192,7 +192,8 @@ async def get_compatibility_analysis(date1, date2):
             elif response.status_code == 400:
                 error_data = response.json()
                 logger.error(f"Gemini API 400 error: {error_data}")
-                return f"❌ Неверный запрос к Gemini API. Проверьте настройки."
+                error_msg = error_data.get('error', {}).get('message', 'Unknown error')
+                return f"❌ Неверный запрос к Gemini API.\n\nОшибка: {error_msg}"
             elif response.status_code == 403:
                 return (
                     "❌ Доступ запрещен (ошибка 403)\n\n"
@@ -201,6 +202,17 @@ async def get_compatibility_analysis(date1, date2):
                     "• API ключ не активирован\n"
                     "• Gemini API недоступен в вашем регионе\n\n"
                     "Получите новый ключ на https://aistudio.google.com/apikey"
+                )
+            elif response.status_code == 404:
+                logger.error(f"Gemini API 404 error: {response.text}")
+                return (
+                    "❌ Ошибка 404: API endpoint не найден\n\n"
+                    "Возможные причины:\n"
+                    "• API ключ неверный или неактивный\n"
+                    "• Неправильный формат ключа\n"
+                    "• API недоступен в вашем регионе\n\n"
+                    "Проверьте ключ на: https://aistudio.google.com/apikey\n"
+                    f"Ключ должен начинаться с 'AIza...'"
                 )
             else:
                 logger.error(f"Gemini API error: {response.status_code} - {response.text}")
