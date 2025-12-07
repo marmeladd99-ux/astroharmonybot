@@ -1,10 +1,12 @@
 import os
 import logging
+import re
 from datetime import datetime
 from flask import Flask, request
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
+import httpx
 
 # Настройка логирования
 logging.basicConfig(
@@ -19,12 +21,16 @@ app = Flask(__name__)
 # Получаем токен из переменных окружения
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 PORT = int(os.environ.get('PORT', 10000))
 
 logger.info(f"Starting bot with PORT={PORT}, WEBHOOK_URL={WEBHOOK_URL}")
 
 if not TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN not set!")
+
+if not OPENAI_API_KEY:
+    logger.warning("OPENAI_API_KEY not set! Compatibility analysis will not work.")
 
 # Создаем настройки для HTTP запросов с увеличенным pool
 request_instance = HTTPXRequest(
@@ -38,6 +44,9 @@ request_instance = HTTPXRequest(
 # Глобальная переменная для application
 application = None
 initialization_lock = False
+
+# Словарь для хранения состояния пользователей
+user_states = {}
 
 def get_application():
     """Ленивая инициализация application"""
@@ -58,7 +67,8 @@ def get_application():
             application.add_handler(CommandHandler("start", start))
             application.add_handler(CommandHandler("help", help_command))
             application.add_handler(CommandHandler("date", date_command))
-            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+            application.add_handler(CommandHandler("compatibility", compatibility_command))
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
             
             # Инициализируем синхронно
             import asyncio
@@ -76,25 +86,100 @@ def get_application():
     
     return application
 
+def parse_date(text):
+    """Парсинг даты из текста в различных форматах"""
+    # Форматы: DD.MM.YYYY, DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD
+    patterns = [
+        r'(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})',  # DD.MM.YYYY
+        r'(\d{4})[./\-](\d{1,2})[./\-](\d{1,2})',  # YYYY-MM-DD
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            groups = match.groups()
+            try:
+                if len(groups[0]) == 4:  # YYYY-MM-DD format
+                    year, month, day = int(groups[0]), int(groups[1]), int(groups[2])
+                else:  # DD.MM.YYYY format
+                    day, month, year = int(groups[0]), int(groups[1]), int(groups[2])
+                
+                # Проверяем валидность даты
+                date_obj = datetime(year, month, day)
+                return date_obj.strftime("%d.%m.%Y")
+            except ValueError:
+                continue
+    
+    return None
+
+async def get_compatibility_analysis(date1, date2):
+    """Получение анализа совместимости через OpenAI API"""
+    if not OPENAI_API_KEY:
+        return "⚠️ API ключ OpenAI не настроен. Пожалуйста, добавьте OPENAI_API_KEY в переменные окружения."
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "gpt-3.5-turbo",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "Ты астролог-эксперт, специализирующийся на анализе совместимости по датам рождения. Давай развернутые, но структурированные ответы на русском языке с эмодзи."
+                        },
+                        {
+                            "role": "user",
+                            "content": f"Проанализируй астрологическую совместимость двух человек, родившихся {date1} и {date2}. Укажи их знаки зодиака, совместимость в любви, дружбе, работе. Дай процент совместимости и краткие рекомендации."
+                        }
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 800
+                }
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                return data['choices'][0]['message']['content']
+            else:
+                logger.error(f"OpenAI API error: {response.status_code} - {response.text}")
+                return f"❌ Ошибка при обращении к OpenAI API: {response.status_code}"
+                
+    except Exception as e:
+        logger.error(f"Error calling OpenAI API: {e}")
+        return f"❌ Произошла ошибка: {str(e)}"
+
 # Обработчики команд
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_text(
         f'Привет, {user.first_name}! 👋\n\n'
-        f'Я AstroHarmony бот. Отправь мне сообщение, и я его повторю!\n\n'
-        f'Команды:\n'
+        f'Я AstroHarmony бот - помогу узнать астрологическую совместимость! ✨\n\n'
+        f'📋 Команды:\n'
         f'/start - начать\n'
         f'/help - помощь\n'
-        f'/date - узнать текущую дату и время'
+        f'/date - показать текущую дату\n'
+        f'/compatibility - начать анализ совместимости\n\n'
+        f'Или просто отправь мне две даты рождения для анализа! 🔮'
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        'Доступные команды:\n'
-        '/start - начать работу\n'
-        '/help - показать это сообщение\n'
-        '/date - показать текущую дату и время\n\n'
-        'Просто напиши мне что-нибудь, и я отвечу!'
+        '📚 Как пользоваться ботом:\n\n'
+        '1️⃣ Отправь команду /compatibility\n'
+        '2️⃣ Введи первую дату рождения\n'
+        '3️⃣ Введи вторую дату рождения\n'
+        '4️⃣ Получи анализ совместимости! 🔮\n\n'
+        '📅 Форматы дат:\n'
+        '• 15.03.1990\n'
+        '• 15/03/1990\n'
+        '• 1990-03-15\n\n'
+        'Или просто напиши две даты в одном сообщении:\n'
+        '"15.03.1990 и 22.07.1985"'
     )
 
 async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -115,8 +200,93 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(message)
 
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f'Вы написали: {update.message.text}')
+async def compatibility_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало процесса анализа совместимости"""
+    user_id = update.effective_user.id
+    user_states[user_id] = {'step': 'waiting_first_date'}
+    
+    await update.message.reply_text(
+        '🔮 Начинаем анализ совместимости!\n\n'
+        '📅 Введите первую дату рождения\n'
+        'Формат: ДД.ММ.ГГГГ (например, 15.03.1990)'
+    )
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка текстовых сообщений"""
+    user_id = update.effective_user.id
+    text = update.message.text
+    
+    # Проверяем, есть ли в сообщении сразу две даты
+    dates = re.findall(r'\d{1,2}[./\-]\d{1,2}[./\-]\d{4}', text)
+    
+    if len(dates) >= 2:
+        # Пользователь отправил сразу две даты
+        date1 = parse_date(dates[0])
+        date2 = parse_date(dates[1])
+        
+        if date1 and date2:
+            await update.message.reply_text(
+                f'✨ Анализирую совместимость...\n\n'
+                f'📅 Дата 1: {date1}\n'
+                f'📅 Дата 2: {date2}\n\n'
+                f'⏳ Пожалуйста, подождите...'
+            )
+            
+            result = await get_compatibility_analysis(date1, date2)
+            await update.message.reply_text(result)
+            
+            # Очищаем состояние
+            if user_id in user_states:
+                del user_states[user_id]
+            return
+    
+    # Обработка пошагового ввода
+    if user_id in user_states:
+        state = user_states[user_id]
+        
+        if state['step'] == 'waiting_first_date':
+            date1 = parse_date(text)
+            if date1:
+                user_states[user_id] = {'step': 'waiting_second_date', 'date1': date1}
+                await update.message.reply_text(
+                    f'✅ Первая дата: {date1}\n\n'
+                    f'📅 Теперь введите вторую дату рождения'
+                )
+            else:
+                await update.message.reply_text(
+                    '❌ Неверный формат даты!\n'
+                    'Используйте формат: ДД.ММ.ГГГГ (например, 15.03.1990)'
+                )
+        
+        elif state['step'] == 'waiting_second_date':
+            date2 = parse_date(text)
+            if date2:
+                date1 = state['date1']
+                
+                await update.message.reply_text(
+                    f'✨ Анализирую совместимость...\n\n'
+                    f'📅 Дата 1: {date1}\n'
+                    f'📅 Дата 2: {date2}\n\n'
+                    f'⏳ Пожалуйста, подождите...'
+                )
+                
+                result = await get_compatibility_analysis(date1, date2)
+                await update.message.reply_text(result)
+                
+                # Очищаем состояние
+                del user_states[user_id]
+            else:
+                await update.message.reply_text(
+                    '❌ Неверный формат даты!\n'
+                    'Используйте формат: ДД.ММ.ГГГГ (например, 15.03.1990)'
+                )
+    else:
+        # Обычный echo
+        await update.message.reply_text(
+            f'Вы написали: {text}\n\n'
+            f'Хотите узнать совместимость? Используйте команду /compatibility\n'
+            f'Или отправьте сразу две даты в формате "15.03.1990 и 22.07.1985"'
+        )
 
 # Flask маршруты
 @app.route('/')
