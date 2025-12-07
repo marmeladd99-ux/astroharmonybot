@@ -21,7 +21,7 @@ app = Flask(__name__)
 # Получаем токен из переменных окружения
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 PORT = int(os.environ.get('PORT', 10000))
 
 logger.info(f"Starting bot with PORT={PORT}, WEBHOOK_URL={WEBHOOK_URL}")
@@ -29,8 +29,8 @@ logger.info(f"Starting bot with PORT={PORT}, WEBHOOK_URL={WEBHOOK_URL}")
 if not TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN not set!")
 
-if not OPENAI_API_KEY:
-    logger.warning("OPENAI_API_KEY not set! Compatibility analysis will not work.")
+if not GEMINI_API_KEY:
+    logger.warning("GEMINI_API_KEY not set! Compatibility analysis will not work.")
 
 # Создаем настройки для HTTP запросов с увеличенным pool
 request_instance = HTTPXRequest(
@@ -113,44 +113,103 @@ def parse_date(text):
     return None
 
 async def get_compatibility_analysis(date1, date2):
-    """Получение анализа совместимости через OpenAI API"""
-    if not OPENAI_API_KEY:
-        return "⚠️ API ключ OpenAI не настроен. Пожалуйста, добавьте OPENAI_API_KEY в переменные окружения."
+    """Получение анализа совместимости через Google Gemini API"""
+    if not GEMINI_API_KEY:
+        return "⚠️ API ключ Gemini не настроен. Пожалуйста, добавьте GEMINI_API_KEY в переменные окружения."
     
     try:
+        prompt = f"""Ты астролог-эксперт. Проанализируй астрологическую совместимость двух человек:
+        
+Дата рождения 1: {date1}
+Дата рождения 2: {date2}
+
+Предоставь анализ в следующем формате:
+
+🔮 АСТРОЛОГИЧЕСКИЙ АНАЛИЗ СОВМЕСТИМОСТИ
+
+👤 Первый человек ({date1}):
+• Знак зодиака: [знак]
+• Стихия: [стихия]
+• Основные черты: [краткое описание]
+
+👤 Второй человек ({date2}):
+• Знак зодиака: [знак]
+• Стихия: [стихия]
+• Основные черты: [краткое описание]
+
+💕 СОВМЕСТИМОСТЬ В ЛЮБВИ: [процент]%
+[2-3 предложения анализа]
+
+🤝 СОВМЕСТИМОСТЬ В ДРУЖБЕ: [процент]%
+[2-3 предложения анализа]
+
+💼 СОВМЕСТИМОСТЬ В РАБОТЕ: [процент]%
+[2-3 предложения анализа]
+
+📊 ОБЩАЯ СОВМЕСТИМОСТЬ: [процент]%
+
+✨ РЕКОМЕНДАЦИИ:
+• [рекомендация 1]
+• [рекомендация 2]
+• [рекомендация 3]
+
+Используй эмодзи для оформления."""
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                "https://api.openai.com/v1/chat/completions",
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}",
                 headers={
-                    "Authorization": f"Bearer {OPENAI_API_KEY}",
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "gpt-3.5-turbo",
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "Ты астролог-эксперт, специализирующийся на анализе совместимости по датам рождения. Давай развернутые, но структурированные ответы на русском языке с эмодзи."
-                        },
-                        {
-                            "role": "user",
-                            "content": f"Проанализируй астрологическую совместимость двух человек, родившихся {date1} и {date2}. Укажи их знаки зодиака, совместимость в любви, дружбе, работе. Дай процент совместимости и краткие рекомендации."
-                        }
-                    ],
-                    "temperature": 0.7,
-                    "max_tokens": 800
+                    "contents": [{
+                        "parts": [{
+                            "text": prompt
+                        }]
+                    }],
+                    "generationConfig": {
+                        "temperature": 0.7,
+                        "maxOutputTokens": 1024
+                    }
                 }
             )
             
             if response.status_code == 200:
                 data = response.json()
-                return data['choices'][0]['message']['content']
+                if 'candidates' in data and len(data['candidates']) > 0:
+                    content = data['candidates'][0]['content']
+                    if 'parts' in content and len(content['parts']) > 0:
+                        return content['parts'][0]['text']
+                    else:
+                        return "❌ Не удалось получить ответ от Gemini"
+                else:
+                    return "❌ Gemini не вернул результат"
+            elif response.status_code == 429:
+                return (
+                    "⚠️ Превышен лимит запросов к Gemini API (ошибка 429)\n\n"
+                    "Пожалуйста, подождите минуту и попробуйте снова."
+                )
+            elif response.status_code == 400:
+                error_data = response.json()
+                logger.error(f"Gemini API 400 error: {error_data}")
+                return f"❌ Неверный запрос к Gemini API. Проверьте настройки."
+            elif response.status_code == 403:
+                return (
+                    "❌ Доступ запрещен (ошибка 403)\n\n"
+                    "Возможные причины:\n"
+                    "• Неверный API ключ Gemini\n"
+                    "• API ключ не активирован\n"
+                    "• Gemini API недоступен в вашем регионе\n\n"
+                    "Получите новый ключ на https://aistudio.google.com/apikey"
+                )
             else:
-                logger.error(f"OpenAI API error: {response.status_code} - {response.text}")
-                return f"❌ Ошибка при обращении к OpenAI API: {response.status_code}"
+                logger.error(f"Gemini API error: {response.status_code} - {response.text}")
+                return f"❌ Ошибка Gemini API: {response.status_code}"
                 
+    except httpx.TimeoutException:
+        return "⏱ Превышено время ожидания. Попробуйте еще раз."
     except Exception as e:
-        logger.error(f"Error calling OpenAI API: {e}")
+        logger.error(f"Error calling Gemini API: {e}")
         return f"❌ Произошла ошибка: {str(e)}"
 
 # Обработчики команд
@@ -164,7 +223,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f'/help - помощь\n'
         f'/date - показать текущую дату\n'
         f'/compatibility - начать анализ совместимости\n\n'
-        f'Или просто отправь мне две даты рождения для анализа! 🔮'
+        f'Или просто отправь мне две даты рождения для анализа! 🔮\n\n'
+        f'Работает на Google Gemini AI 🌟'
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -179,7 +239,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '• 15/03/1990\n'
         '• 1990-03-15\n\n'
         'Или просто напиши две даты в одном сообщении:\n'
-        '"15.03.1990 и 22.07.1985"'
+        '"15.03.1990 и 22.07.1985"\n\n'
+        '🌟 Работает на Google Gemini AI'
     )
 
 async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -226,7 +287,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if date1 and date2:
             await update.message.reply_text(
-                f'✨ Анализирую совместимость...\n\n'
+                f'✨ Анализирую совместимость через Google Gemini AI...\n\n'
                 f'📅 Дата 1: {date1}\n'
                 f'📅 Дата 2: {date2}\n\n'
                 f'⏳ Пожалуйста, подождите...'
@@ -264,7 +325,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 date1 = state['date1']
                 
                 await update.message.reply_text(
-                    f'✨ Анализирую совместимость...\n\n'
+                    f'✨ Анализирую совместимость через Google Gemini AI...\n\n'
                     f'📅 Дата 1: {date1}\n'
                     f'📅 Дата 2: {date2}\n\n'
                     f'⏳ Пожалуйста, подождите...'
@@ -291,7 +352,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Flask маршруты
 @app.route('/')
 def index():
-    return 'Telegram Bot is running! ✅', 200
+    return 'Telegram Bot is running! ✅ Powered by Google Gemini AI 🌟', 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
