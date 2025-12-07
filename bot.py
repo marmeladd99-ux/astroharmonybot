@@ -364,13 +364,26 @@ def webhook():
             return 'Application not ready', 503
         
         # Используем бота из application, который уже инициализирован
-        update = Update.de_json(request.get_json(force=True), app_instance.bot)
+        json_data = request.get_json(force=True)
+        update = Update.de_json(json_data, app_instance.bot)
         
+        # Создаём новую корутину для обработки update
         import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(app_instance.process_update(update))
-        loop.close()
+        
+        async def process():
+            await app_instance.process_update(update)
+        
+        # Запускаем в новом event loop
+        try:
+            asyncio.run(process())
+        except RuntimeError:
+            # Если asyncio.run не работает, пробуем старый способ
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(process())
+            finally:
+                loop.close()
         
         return 'ok', 200
     except Exception as e:
