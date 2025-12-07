@@ -1,32 +1,24 @@
 import os
-from flask import Flask, request
-import telebot
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-TOKEN = os.getenv("BOT_TOKEN")
-bot = telebot.TeleBot(TOKEN)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text('Привет! Я бот на Render!')
 
-server = Flask(__name__)
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f'Вы написали: {update.message.text}')
 
-@bot.message_handler(commands=['start'])
-def start(msg):
-    bot.reply_to(msg, "Привет! Я бот совместимости ✨ Напиши свою дату рождения.")
+def main():
+    # Токен берется из переменных окружения
+    token = os.environ.get('TELEGRAM_BOT_TOKEN')
+    
+    application = Application.builder().token(token).build()
+    
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+    
+    print("Бот запущен!")
+    application.run_polling()
 
-@bot.message_handler(func=lambda m: True)
-def all_msg(msg):
-    bot.reply_to(msg, "Я скоро научусь считать совместимость ✨")
-
-# Flask маршрут для Telegram
-@server.route('/' + TOKEN, methods=['POST'])
-def telegram_webhook():
-    json_string = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_string)
-    bot.process_new_updates([update])
-    return "OK", 200
-
-# Корневой маршрут (чтобы Render не выдавал Not Found)
-@server.route('/')
-def index():
-    return "Bot is running!", 200
-
-if __name__ == "__main__":
-    server.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
+if __name__ == '__main__':
+    main()
