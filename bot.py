@@ -12,7 +12,9 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Токен
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
+PORT = int(os.environ.get('PORT', 10000))
 if not TOKEN:
     raise ValueError("BOT_TOKEN is not set!")
 
@@ -85,7 +87,7 @@ def webhook():
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
     """Установка webhook вручную"""
-    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+    
     if not WEBHOOK_URL:
         return "WEBHOOK_URL not set", 500
 
@@ -97,6 +99,6 @@ def set_webhook():
 
 
 if __name__ == "__main__":
-    PORT = int(os.getenv("PORT", 10000))
+    
     logger.info(f"Starting Flask app on port {PORT}")
     app.run(host="0.0.0.0", port=PORT, debug=False)
