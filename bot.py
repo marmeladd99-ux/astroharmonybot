@@ -5,6 +5,8 @@ from flask import Flask, request
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
+import asyncio
+from threading import Thread
 
 # Настройка логирования
 logging.basicConfig(
@@ -26,7 +28,7 @@ logger.info(f"Starting bot with PORT={PORT}, WEBHOOK_URL={WEBHOOK_URL}")
 if not TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN not set!")
 
-# Создаем настройки для HTTP запросов с увеличенным pool
+# Создаем настройки для HTTP запросов
 request_instance = HTTPXRequest(
     connection_pool_size=20,
     connect_timeout=30.0,
@@ -35,47 +37,54 @@ request_instance = HTTPXRequest(
     pool_timeout=30.0
 )
 
-# Создаем бота с настроенным request
+# Создаем бота
 bot = Bot(token=TOKEN, request=request_instance)
 
 # Глобальная переменная для application
 application = None
-initialization_lock = False
+loop = None
+loop_thread = None
 
-def get_application():
-    """Ленивая инициализация application"""
-    global application, initialization_lock
+def start_event_loop():
+    """Запускает event loop в отдельном потоке"""
+    global loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+def initialize_application():
+    """Инициализация application"""
+    global application, loop, loop_thread
     
-    if application is None and not initialization_lock:
-        initialization_lock = True
-        try:
-            application = (
-                Application.builder()
-                .token(TOKEN)
-                .request(request_instance)
-                .updater(None)
-                .build()
-            )
-            
-            # Добавляем обработчики
-            application.add_handler(CommandHandler("start", start))
-            application.add_handler(CommandHandler("help", help_command))
-            application.add_handler(CommandHandler("date", date_command))
-            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
-            
-            # Инициализируем синхронно
-            import asyncio
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(application.initialize())
-            loop.run_until_complete(application.start())
-            logger.info("Application initialized and started")
-        except Exception as e:
-            logger.error(f"Error initializing application: {e}")
-            initialization_lock = False
-            raise
-        finally:
-            initialization_lock = False
+    if application is None:
+        # Запускаем event loop в отдельном потоке
+        loop_thread = Thread(target=start_event_loop, daemon=True)
+        loop_thread.start()
+        
+        # Ждём пока loop инициализируется
+        import time
+        time.sleep(0.5)
+        
+        # Создаём application
+        application = (
+            Application.builder()
+            .token(TOKEN)
+            .request(request_instance)
+            .updater(None)
+            .build()
+        )
+        
+        # Добавляем обработчики
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("date", date_command))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+        
+        # Инициализируем application
+        asyncio.run_coroutine_threadsafe(application.initialize(), loop).result()
+        asyncio.run_coroutine_threadsafe(application.start(), loop).result()
+        
+        logger.info("Application initialized and started")
     
     return application
 
@@ -105,9 +114,9 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now()
     
     # Форматируем дату
-    date_str = now.strftime('%d.%m.%Y')  # День.Месяц.Год
-    time_str = now.strftime('%H:%M:%S')  # Часы:Минуты:Секунды
-    weekday = now.strftime('%A')  # День недели
+    date_str = now.strftime('%d.%m.%Y')
+    time_str = now.strftime('%H:%M:%S')
+    weekday = now.strftime('%A')
     
     # Переводим день недели на русский
     weekdays_ru = {
@@ -121,7 +130,6 @@ async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     weekday_ru = weekdays_ru.get(weekday, weekday)
     
-    # Формируем ответ
     response = (
         f'📅 Сегодня: {weekday_ru}\n'
         f'📆 Дата: {date_str}\n'
@@ -142,18 +150,15 @@ def index():
 def webhook():
     """Обработка входящих обновлений от Telegram"""
     try:
-        app_instance = get_application()
-        if app_instance is None:
-            logger.error("Application not initialized")
-            return 'Application not ready', 503
-            
+        app_instance = initialize_application()
         update = Update.de_json(request.get_json(force=True), bot)
         
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(app_instance.process_update(update))
-        loop.close()
+        # Выполняем в нашем event loop
+        future = asyncio.run_coroutine_threadsafe(
+            app_instance.process_update(update),
+            loop
+        )
+        future.result(timeout=30)
         
         return 'ok', 200
     except Exception as e:
@@ -169,16 +174,22 @@ def set_webhook():
             
         webhook_url = f"{WEBHOOK_URL}/webhook"
         
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Инициализируем application если ещё не инициализирован
+        initialize_application()
         
         # Удаляем старый webhook
-        loop.run_until_complete(bot.delete_webhook(drop_pending_updates=True))
+        future = asyncio.run_coroutine_threadsafe(
+            bot.delete_webhook(drop_pending_updates=True),
+            loop
+        )
+        future.result()
         
         # Устанавливаем новый
-        result = loop.run_until_complete(bot.set_webhook(url=webhook_url))
-        loop.close()
+        future = asyncio.run_coroutine_threadsafe(
+            bot.set_webhook(url=webhook_url),
+            loop
+        )
+        result = future.result()
         
         logger.info(f'Webhook set to {webhook_url}')
         return f'Webhook set to {webhook_url}. Result: {result}', 200
@@ -190,11 +201,13 @@ def set_webhook():
 def webhook_info():
     """Проверка статуса webhook"""
     try:
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        info = loop.run_until_complete(bot.get_webhook_info())
-        loop.close()
+        initialize_application()
+        
+        future = asyncio.run_coroutine_threadsafe(
+            bot.get_webhook_info(),
+            loop
+        )
+        info = future.result()
         
         return {
             'url': info.url,
