@@ -1,12 +1,10 @@
 import os
 import logging
-import re
-from datetime import datetime
-from flask import Flask, request
-from telegram import Bot, Update
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.request import HTTPXRequest
-import httpx
+from flask import Flask, request
+import asyncio
+from threading import Thread
 
 # Настройка логирования
 logging.basicConfig(
@@ -15,466 +13,117 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Flask приложение
-app = Flask(__name__)
-
-# Получаем токен из переменных окружения
-TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-PORT = int(os.environ.get('PORT', 10000))
-
-logger.info(f"Starting bot with PORT={PORT}, WEBHOOK_URL={WEBHOOK_URL}")
+# Получаем токен и URL из переменных окружения
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')  # https://your-app.onrender.com
 
 if not TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN not set!")
+    raise ValueError("TELEGRAM_BOT_TOKEN not found in environment variables")
 
-if not GEMINI_API_KEY:
-    logger.warning("GEMINI_API_KEY not set! Compatibility analysis will not work.")
+# Создаем Flask приложение
+app = Flask(__name__)
 
-# Создаем настройки для HTTP запросов с увеличенным pool
-request_instance = HTTPXRequest(
-    connection_pool_size=20,
-    connect_timeout=30.0,
-    read_timeout=30.0,
-    write_timeout=30.0,
-    pool_timeout=30.0
-)
+# Создаем приложение бота
+application = Application.builder().token(TOKEN).build()
 
-# Глобальная переменная для application
-application = None
-initialization_lock = False
-
-# Словарь для хранения состояния пользователей
-user_states = {}
-
-def get_application():
-    """Ленивая инициализация application"""
-    global application, initialization_lock
-    
-    if application is None and not initialization_lock:
-        initialization_lock = True
-        try:
-            application = (
-                Application.builder()
-                .token(TOKEN)
-                .request(request_instance)
-                .updater(None)
-                .build()
-            )
-            
-            # Добавляем обработчики
-            application.add_handler(CommandHandler("start", start))
-            application.add_handler(CommandHandler("help", help_command))
-            application.add_handler(CommandHandler("date", date_command))
-            application.add_handler(CommandHandler("compatibility", compatibility_command))
-            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-            
-            # Инициализируем синхронно
-            import asyncio
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(application.initialize())
-            loop.run_until_complete(application.start())
-            logger.info("Application initialized and started")
-        except Exception as e:
-            logger.error(f"Error initializing application: {e}")
-            initialization_lock = False
-            raise
-        finally:
-            initialization_lock = False
-    
-    return application
-
-def parse_date(text):
-    """Парсинг даты из текста в различных форматах"""
-    # Форматы: DD.MM.YYYY, DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD
-    patterns = [
-        r'(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})',  # DD.MM.YYYY
-        r'(\d{4})[./\-](\d{1,2})[./\-](\d{1,2})',  # YYYY-MM-DD
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            groups = match.groups()
-            try:
-                if len(groups[0]) == 4:  # YYYY-MM-DD format
-                    year, month, day = int(groups[0]), int(groups[1]), int(groups[2])
-                else:  # DD.MM.YYYY format
-                    day, month, year = int(groups[0]), int(groups[1]), int(groups[2])
-                
-                # Проверяем валидность даты
-                date_obj = datetime(year, month, day)
-                return date_obj.strftime("%d.%m.%Y")
-            except ValueError:
-                continue
-    
-    return None
-
-async def get_compatibility_analysis(date1, date2):
-    """Получение анализа совместимости через Google Gemini API"""
-    if not GEMINI_API_KEY:
-        return "⚠️ API ключ Gemini не настроен. Пожалуйста, добавьте GEMINI_API_KEY в переменные окружения."
-    
-    try:
-        prompt = f"""Ты астролог-эксперт. Проанализируй астрологическую совместимость двух человек:
-        
-Дата рождения 1: {date1}
-Дата рождения 2: {date2}
-
-Предоставь анализ в следующем формате:
-
-🔮 АСТРОЛОГИЧЕСКИЙ АНАЛИЗ СОВМЕСТИМОСТИ
-
-👤 Первый человек ({date1}):
-• Знак зодиака: [знак]
-• Стихия: [стихия]
-• Основные черты: [краткое описание]
-
-👤 Второй человек ({date2}):
-• Знак зодиака: [знак]
-• Стихия: [стихия]
-• Основные черты: [краткое описание]
-
-💕 СОВМЕСТИМОСТЬ В ЛЮБВИ: [процент]%
-[2-3 предложения анализа]
-
-🤝 СОВМЕСТИМОСТЬ В ДРУЖБЕ: [процент]%
-[2-3 предложения анализа]
-
-💼 СОВМЕСТИМОСТЬ В РАБОТЕ: [процент]%
-[2-3 предложения анализа]
-
-📊 ОБЩАЯ СОВМЕСТИМОСТЬ: [процент]%
-
-✨ РЕКОМЕНДАЦИИ:
-• [рекомендация 1]
-• [рекомендация 2]
-• [рекомендация 3]
-
-Используй эмодзи для оформления."""
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}",
-                headers={
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "contents": [{
-                        "parts": [{
-                            "text": prompt
-                        }]
-                    }],
-                    "generationConfig": {
-                        "temperature": 0.7,
-                        "maxOutputTokens": 1024
-                    }
-                }
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if 'candidates' in data and len(data['candidates']) > 0:
-                    content = data['candidates'][0]['content']
-                    if 'parts' in content and len(content['parts']) > 0:
-                        return content['parts'][0]['text']
-                    else:
-                        return "❌ Не удалось получить ответ от Gemini"
-                else:
-                    return "❌ Gemini не вернул результат"
-            elif response.status_code == 429:
-                return (
-                    "⚠️ Превышен лимит запросов к Gemini API (ошибка 429)\n\n"
-                    "Пожалуйста, подождите минуту и попробуйте снова."
-                )
-            elif response.status_code == 400:
-                error_data = response.json()
-                logger.error(f"Gemini API 400 error: {error_data}")
-                error_msg = error_data.get('error', {}).get('message', 'Unknown error')
-                return f"❌ Неверный запрос к Gemini API.\n\nОшибка: {error_msg}"
-            elif response.status_code == 403:
-                return (
-                    "❌ Доступ запрещен (ошибка 403)\n\n"
-                    "Возможные причины:\n"
-                    "• Неверный API ключ Gemini\n"
-                    "• API ключ не активирован\n"
-                    "• Gemini API недоступен в вашем регионе\n\n"
-                    "Получите новый ключ на https://aistudio.google.com/apikey"
-                )
-            elif response.status_code == 404:
-                logger.error(f"Gemini API 404 error: {response.text}")
-                return (
-                    "❌ Ошибка 404: API endpoint не найден\n\n"
-                    "Возможные причины:\n"
-                    "• API ключ неверный или неактивный\n"
-                    "• Неправильный формат ключа\n"
-                    "• API недоступен в вашем регионе\n\n"
-                    "Проверьте ключ на: https://aistudio.google.com/apikey\n"
-                    f"Ключ должен начинаться с 'AIza...'"
-                )
-            else:
-                logger.error(f"Gemini API error: {response.status_code} - {response.text}")
-                return f"❌ Ошибка Gemini API: {response.status_code}"
-                
-    except httpx.TimeoutException:
-        return "⏱ Превышено время ожидания. Попробуйте еще раз."
-    except Exception as e:
-        logger.error(f"Error calling Gemini API: {e}")
-        return f"❌ Произошла ошибка: {str(e)}"
-
-# Обработчики команд
+# Обработчик команды /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
     await update.message.reply_text(
-        f'Привет, {user.first_name}! 👋\n\n'
-        f'Я AstroHarmony бот - помогу узнать астрологическую совместимость! ✨\n\n'
-        f'📋 Команды:\n'
-        f'/start - начать\n'
-        f'/help - помощь\n'
-        f'/date - показать текущую дату\n'
-        f'/compatibility - начать анализ совместимости\n\n'
-        f'Или просто отправь мне две даты рождения для анализа! 🔮\n\n'
-        f'Работает на Google Gemini AI 🌟'
+        '👋 Привет! Я AstroHarmony бот.\n\n'
+        'Отправь мне свою дату рождения в формате ДД.ММ.ГГГГ (например, 15.03.1990), '
+        'и я расскажу о твоем знаке зодиака!'
     )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        '📚 Как пользоваться ботом:\n\n'
-        '1️⃣ Отправь команду /compatibility\n'
-        '2️⃣ Введи первую дату рождения\n'
-        '3️⃣ Введи вторую дату рождения\n'
-        '4️⃣ Получи анализ совместимости! 🔮\n\n'
-        '📅 Форматы дат:\n'
-        '• 15.03.1990\n'
-        '• 15/03/1990\n'
-        '• 1990-03-15\n\n'
-        'Или просто напиши две даты в одном сообщении:\n'
-        '"15.03.1990 и 22.07.1985"\n\n'
-        '🌟 Работает на Google Gemini AI'
-    )
-
-async def date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /date - показывает текущую дату и время"""
-    now = datetime.now()
-    
-    # Форматируем дату и время по-русски
-    date_str = now.strftime("%d.%m.%Y")
-    time_str = now.strftime("%H:%M:%S")
-    weekday = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"][now.weekday()]
-    
-    message = (
-        f"📅 Текущая дата и время:\n\n"
-        f"🗓 Дата: {date_str}\n"
-        f"🕐 Время: {time_str}\n"
-        f"📆 День недели: {weekday}"
-    )
-    
-    await update.message.reply_text(message)
-
-async def compatibility_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начало процесса анализа совместимости"""
-    user_id = update.effective_user.id
-    user_states[user_id] = {'step': 'waiting_first_date'}
-    
-    await update.message.reply_text(
-        '🔮 Начинаем анализ совместимости!\n\n'
-        '📅 Введите первую дату рождения\n'
-        'Формат: ДД.ММ.ГГГГ (например, 15.03.1990)'
-    )
-
+# Обработчик текстовых сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка текстовых сообщений"""
-    user_id = update.effective_user.id
-    text = update.message.text
+    user_message = update.message.text
     
-    # Проверяем, есть ли в сообщении сразу две даты
-    dates = re.findall(r'\d{1,2}[./\-]\d{1,2}[./\-]\d{4}', text)
-    
-    if len(dates) >= 2:
-        # Пользователь отправил сразу две даты
-        date1 = parse_date(dates[0])
-        date2 = parse_date(dates[1])
-        
-        if date1 and date2:
+    # Простая проверка формата даты
+    if len(user_message.split('.')) == 3:
+        try:
+            day, month, year = map(int, user_message.split('.'))
+            
+            # Определение знака зодиака
+            zodiac_sign = get_zodiac_sign(day, month)
+            
+            response = f'🌟 Твой знак зодиака: {zodiac_sign}\n\n'
+            response += 'Спасибо за использование AstroHarmony!'
+            
+            await update.message.reply_text(response)
+        except ValueError:
             await update.message.reply_text(
-                f'✨ Анализирую совместимость через Google Gemini AI...\n\n'
-                f'📅 Дата 1: {date1}\n'
-                f'📅 Дата 2: {date2}\n\n'
-                f'⏳ Пожалуйста, подождите...'
+                '❌ Неправильный формат даты.\n'
+                'Пожалуйста, используй формат ДД.ММ.ГГГГ (например, 15.03.1990)'
             )
-            
-            result = await get_compatibility_analysis(date1, date2)
-            await update.message.reply_text(result)
-            
-            # Очищаем состояние
-            if user_id in user_states:
-                del user_states[user_id]
-            return
-    
-    # Обработка пошагового ввода
-    if user_id in user_states:
-        state = user_states[user_id]
-        
-        if state['step'] == 'waiting_first_date':
-            date1 = parse_date(text)
-            if date1:
-                user_states[user_id] = {'step': 'waiting_second_date', 'date1': date1}
-                await update.message.reply_text(
-                    f'✅ Первая дата: {date1}\n\n'
-                    f'📅 Теперь введите вторую дату рождения'
-                )
-            else:
-                await update.message.reply_text(
-                    '❌ Неверный формат даты!\n'
-                    'Используйте формат: ДД.ММ.ГГГГ (например, 15.03.1990)'
-                )
-        
-        elif state['step'] == 'waiting_second_date':
-            date2 = parse_date(text)
-            if date2:
-                date1 = state['date1']
-                
-                await update.message.reply_text(
-                    f'✨ Анализирую совместимость через Google Gemini AI...\n\n'
-                    f'📅 Дата 1: {date1}\n'
-                    f'📅 Дата 2: {date2}\n\n'
-                    f'⏳ Пожалуйста, подождите...'
-                )
-                
-                result = await get_compatibility_analysis(date1, date2)
-                await update.message.reply_text(result)
-                
-                # Очищаем состояние
-                del user_states[user_id]
-            else:
-                await update.message.reply_text(
-                    '❌ Неверный формат даты!\n'
-                    'Используйте формат: ДД.ММ.ГГГГ (например, 15.03.1990)'
-                )
     else:
-        # Обычный echo
         await update.message.reply_text(
-            f'Вы написали: {text}\n\n'
-            f'Хотите узнать совместимость? Используйте команду /compatibility\n'
-            f'Или отправьте сразу две даты в формате "15.03.1990 и 22.07.1985"'
+            '❌ Неправильный формат.\n'
+            'Отправь дату рождения в формате ДД.ММ.ГГГГ (например, 15.03.1990)'
         )
 
-# Flask маршруты
+def get_zodiac_sign(day: int, month: int) -> str:
+    """Определяет знак зодиака по дате"""
+    if (month == 3 and day >= 21) or (month == 4 and day <= 19):
+        return "♈ Овен"
+    elif (month == 4 and day >= 20) or (month == 5 and day <= 20):
+        return "♉ Телец"
+    elif (month == 5 and day >= 21) or (month == 6 and day <= 20):
+        return "♊ Близнецы"
+    elif (month == 6 and day >= 21) or (month == 7 and day <= 22):
+        return "♋ Рак"
+    elif (month == 7 and day >= 23) or (month == 8 and day <= 22):
+        return "♌ Лев"
+    elif (month == 8 and day >= 23) or (month == 9 and day <= 22):
+        return "♍ Дева"
+    elif (month == 9 and day >= 23) or (month == 10 and day <= 22):
+        return "♎ Весы"
+    elif (month == 10 and day >= 23) or (month == 11 and day <= 21):
+        return "♏ Скорпион"
+    elif (month == 11 and day >= 22) or (month == 12 and day <= 21):
+        return "♐ Стрелец"
+    elif (month == 12 and day >= 22) or (month == 1 and day <= 19):
+        return "♑ Козерог"
+    elif (month == 1 and day >= 20) or (month == 2 and day <= 18):
+        return "♒ Водолей"
+    else:
+        return "♓ Рыбы"
+
+# Webhook endpoint
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    """Обработка входящих обновлений через webhook"""
+    json_data = request.get_json()
+    update = Update.de_json(json_data, application.bot)
+    
+    # Запускаем обработку в event loop
+    asyncio.run(application.process_update(update))
+    
+    return 'ok'
+
 @app.route('/')
 def index():
-    return 'Telegram Bot is running! ✅ Powered by Google Gemini AI 🌟', 200
+    return 'Bot is running!'
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Обработка входящих обновлений от Telegram"""
-    try:
-        app_instance = get_application()
-        if app_instance is None:
-            logger.error("Application not initialized")
-            return 'Application not ready', 503
-        
-        # Используем бота из application, который уже инициализирован
-        json_data = request.get_json(force=True)
-        update = Update.de_json(json_data, app_instance.bot)
-        
-        # Создаём новую корутину для обработки update
-        import asyncio
-        
-        async def process():
-            await app_instance.process_update(update)
-        
-        # Запускаем в новом event loop
-        try:
-            asyncio.run(process())
-        except RuntimeError:
-            # Если asyncio.run не работает, пробуем старый способ
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(process())
-            finally:
-                loop.close()
-        
-        return 'ok', 200
-    except Exception as e:
-        logger.error(f'Error processing update: {e}', exc_info=True)
-        return 'error', 500
+@app.route('/health')
+def health():
+    return 'OK'
 
-@app.route('/set_webhook')
-def set_webhook():
-    """Установка webhook"""
-    try:
-        if not WEBHOOK_URL:
-            return 'WEBHOOK_URL not set', 500
-            
-        webhook_url = f"{WEBHOOK_URL}/webhook"
-        
-        # Создаём новую корутину для установки webhook
-        import asyncio
-        
-        async def setup_webhook():
-            # Получаем инициализированное приложение
-            app_instance = get_application()
-            
-            # Удаляем старый webhook
-            await app_instance.bot.delete_webhook(drop_pending_updates=True)
-            
-            # Устанавливаем новый
-            result = await app_instance.bot.set_webhook(url=webhook_url)
-            return result
-        
-        # Запускаем в новом event loop
-        try:
-            result = asyncio.run(setup_webhook())
-        except RuntimeError:
-            # Если asyncio.run не работает, создаём новый loop
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                result = loop.run_until_complete(setup_webhook())
-            finally:
-                loop.close()
-        
-        logger.info(f'Webhook set to {webhook_url}')
-        return f'Webhook set to {webhook_url}. Result: {result}', 200
-    except Exception as e:
-        logger.error(f'Error setting webhook: {e}', exc_info=True)
-        return f'Error: {str(e)}', 500
+# Регистрация обработчиков
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-@app.route('/webhook_info')
-def webhook_info():
-    """Проверка статуса webhook"""
-    try:
-        import asyncio
-        
-        async def get_info():
-            app_instance = get_application()
-            info = await app_instance.bot.get_webhook_info()
-            return info
-        
-        # Запускаем в новом event loop
-        try:
-            info = asyncio.run(get_info())
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                info = loop.run_until_complete(get_info())
-            finally:
-                loop.close()
-        
-        return {
-            'url': info.url,
-            'pending_update_count': info.pending_update_count,
-            'last_error_date': str(info.last_error_date) if info.last_error_date else None,
-            'last_error_message': info.last_error_message
-        }, 200
-    except Exception as e:
-        logger.error(f'Error getting webhook info: {e}', exc_info=True)
-        return f'Error: {str(e)}', 500
+# Инициализация бота
+def setup_webhook():
+    """Настройка webhook"""
+    asyncio.run(application.initialize())
+    asyncio.run(application.bot.set_webhook(url=f"{WEBHOOK_URL}/{TOKEN}"))
+    logger.info(f"Webhook set to {WEBHOOK_URL}/{TOKEN}")
 
 if __name__ == '__main__':
-    logger.info(f"Starting Flask app on 0.0.0.0:{PORT}")
-    app.run(host='0.0.0.0', port=PORT, debug=False)
+    # Настраиваем webhook при запуске
+    if WEBHOOK_URL:
+        setup_webhook()
+    
+    # Запускаем Flask сервер
+    port = int(os.getenv('PORT', 8000))
+    app.run(host='0.0.0.0', port=port)
