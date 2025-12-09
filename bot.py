@@ -3,6 +3,7 @@ import logging
 from flask import Flask, request
 from telegram import Bot, Update
 import re
+import asyncio
 
 # Настройка логирования
 logging.basicConfig(
@@ -21,7 +22,7 @@ if not TOKEN:
 # Создаем Flask приложение
 app = Flask(__name__)
 
-# Создаем бота синхронно
+# Создаем бота
 bot = Bot(token=TOKEN)
 
 def get_zodiac_sign(day, month):
@@ -88,6 +89,14 @@ def get_compatibility(sign1, sign2):
     
     return score, level, emoji
 
+async def send_message_async(chat_id, text):
+    """Асинхронная отправка сообщения"""
+    await bot.send_message(chat_id=chat_id, text=text)
+
+def send_message_sync(chat_id, text):
+    """Синхронная обёртка для отправки сообщения"""
+    asyncio.run(send_message_async(chat_id, text))
+
 def process_message(message_text, chat_id):
     """Обработка сообщения"""
     text = message_text.strip()
@@ -101,7 +110,7 @@ def process_message(message_text, chat_id):
             'Или отправь две даты через " и " для проверки совместимости:\n'
             '15.03.1990 и 22.07.1985'
         )
-        bot.send_message(chat_id=chat_id, text=response)
+        send_message_sync(chat_id, response)
         return
     
     # Проверяем команду /compatibility
@@ -111,7 +120,7 @@ def process_message(message_text, chat_id):
             '15.03.1990 и 22.07.1985\n\n'
             'Или просто отправьте две даты через " и "'
         )
-        bot.send_message(chat_id=chat_id, text=response)
+        send_message_sync(chat_id, response)
         return
     
     # Проверяем, есть ли " и " в сообщении (для совместимости)
@@ -140,10 +149,9 @@ def process_message(message_text, chat_id):
                 response += f'🌟 Знак зодиака: {sign2}\n\n'
                 response += f'💕 Совместимость: {level} {emoji}\n'
                 response += f'📊 Оценка: {score}%\n\n'
-                response += '⏳ Пожалуйста, подождите...\n'
-                response += 'Готовлю для вас подробный анализ совместимости!'
+                response += 'Спасибо за использование AstroHarmony! ✨'
                 
-                bot.send_message(chat_id=chat_id, text=response)
+                send_message_sync(chat_id, response)
                 return
                 
             except (ValueError, IndexError):
@@ -152,7 +160,7 @@ def process_message(message_text, chat_id):
                     'Используйте формат: ДД.ММ.ГГГГ и ДД.ММ.ГГГГ\n'
                     'Например: 15.03.1990 и 22.07.1985'
                 )
-                bot.send_message(chat_id=chat_id, text=response)
+                send_message_sync(chat_id, response)
                 return
     
     # Обработка одной даты
@@ -173,14 +181,14 @@ def process_message(message_text, chat_id):
             response += 'Или отправьте сразу две даты в формате:\n'
             response += '"15.03.1990 и 22.07.1985"'
             
-            bot.send_message(chat_id=chat_id, text=response)
+            send_message_sync(chat_id, response)
         except ValueError:
             response = (
                 '❌ Неправильный формат даты.\n'
                 'Пожалуйста, используйте формат ДД.ММ.ГГГГ\n'
                 'Например: 15.03.1990'
             )
-            bot.send_message(chat_id=chat_id, text=response)
+            send_message_sync(chat_id, response)
     else:
         response = (
             '❌ Неправильный формат.\n\n'
@@ -188,9 +196,9 @@ def process_message(message_text, chat_id):
             '💕 Для совместимости: 15.03.1990 и 22.07.1985\n'
             '📋 Или используйте команду /compatibility'
         )
-        bot.send_message(chat_id=chat_id, text=response)
+        send_message_sync(chat_id, response)
 
-# Webhook endpoint
+# Webhook endpoint - ПРАВИЛЬНЫЙ URL С ТОКЕНОМ
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
     """Обработка входящих обновлений через webhook"""
@@ -201,6 +209,7 @@ def webhook():
         if update.message and update.message.text:
             chat_id = update.message.chat_id
             message_text = update.message.text
+            logger.info(f"Received message: {message_text} from chat_id: {chat_id}")
             process_message(message_text, chat_id)
         
         return 'ok'
@@ -222,10 +231,13 @@ def set_webhook():
     try:
         if WEBHOOK_URL:
             webhook_url = f"{WEBHOOK_URL}/{TOKEN}"
-            bot.set_webhook(url=webhook_url)
-            return f'Webhook set to {webhook_url}'
+            # Правильный асинхронный вызов
+            result = asyncio.run(bot.set_webhook(url=webhook_url))
+            logger.info(f"Webhook set to {webhook_url}")
+            return f'Webhook set successfully to {webhook_url}'
         return 'WEBHOOK_URL not set'
     except Exception as e:
+        logger.error(f'Error setting webhook: {e}')
         return f'Error setting webhook: {e}'
 
 if __name__ == '__main__':
