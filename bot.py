@@ -2,9 +2,7 @@ import os
 import logging
 from flask import Flask, request
 from telegram import Bot, Update
-from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters
-import asyncio
-from queue import Queue
+import re
 
 # Настройка логирования
 logging.basicConfig(
@@ -23,30 +21,8 @@ if not TOKEN:
 # Создаем Flask приложение
 app = Flask(__name__)
 
-# Создаем бота
+# Создаем бота синхронно
 bot = Bot(token=TOKEN)
-
-# Создаем диспетчер
-update_queue = Queue()
-dispatcher = Dispatcher(bot, update_queue, use_context=True)
-
-# Обработчик команды /start
-def start(update, context):
-    update.message.reply_text(
-        '👋 Привет! Я AstroHarmony бот.\n\n'
-        'Отправь мне свою дату рождения в формате ДД.ММ.ГГГГ (например, 15.03.1990), '
-        'и я расскажу о твоем знаке зодиака!\n\n'
-        'Или отправь две даты через " и " для проверки совместимости:\n'
-        '15.03.1990 и 22.07.1985'
-    )
-
-# Обработчик команды /compatibility
-def compatibility_command(update, context):
-    update.message.reply_text(
-        '💕 Для проверки совместимости отправьте две даты в формате:\n'
-        '15.03.1990 и 22.07.1985\n\n'
-        'Или просто отправьте две даты через " и "'
-    )
 
 def get_zodiac_sign(day, month):
     """Определяет знак зодиака по дате"""
@@ -76,12 +52,10 @@ def get_zodiac_sign(day, month):
         return "♓ Рыбы"
 
 def get_compatibility(sign1, sign2):
-    """Определяет совместимость двух знаков (упрощенная версия)"""
-    # Получаем только символ знака
+    """Определяет совместимость двух знаков"""
     s1 = sign1.split()[0]
     s2 = sign2.split()[0]
     
-    # Упрощенная матрица совместимости
     compatibility_map = {
         ('♈', '♌'): 95, ('♈', '♐'): 90, ('♈', '♊'): 85,
         ('♉', '♍'): 95, ('♉', '♑'): 90, ('♉', '♋'): 85,
@@ -97,7 +71,6 @@ def get_compatibility(sign1, sign2):
         ('♓', '♋'): 90, ('♓', '♏'): 90, ('♓', '♉'): 85,
     }
     
-    # Проверяем оба варианта (знак1-знак2 и знак2-знак1)
     score = compatibility_map.get((s1, s2)) or compatibility_map.get((s2, s1)) or 70
     
     if score >= 90:
@@ -115,14 +88,35 @@ def get_compatibility(sign1, sign2):
     
     return score, level, emoji
 
-# Обработчик текстовых сообщений
-def handle_message(update, context):
-    user_message = update.message.text.strip()
+def process_message(message_text, chat_id):
+    """Обработка сообщения"""
+    text = message_text.strip()
+    
+    # Проверяем команду /start
+    if text.startswith('/start'):
+        response = (
+            '👋 Привет! Я AstroHarmony бот.\n\n'
+            'Отправь мне свою дату рождения в формате ДД.ММ.ГГГГ (например, 15.03.1990), '
+            'и я расскажу о твоем знаке зодиака!\n\n'
+            'Или отправь две даты через " и " для проверки совместимости:\n'
+            '15.03.1990 и 22.07.1985'
+        )
+        bot.send_message(chat_id=chat_id, text=response)
+        return
+    
+    # Проверяем команду /compatibility
+    if text.startswith('/compatibility'):
+        response = (
+            '💕 Для проверки совместимости отправьте две даты в формате:\n'
+            '15.03.1990 и 22.07.1985\n\n'
+            'Или просто отправьте две даты через " и "'
+        )
+        bot.send_message(chat_id=chat_id, text=response)
+        return
     
     # Проверяем, есть ли " и " в сообщении (для совместимости)
-    if ' и ' in user_message or ' И ' in user_message:
-        # Разделяем две даты
-        parts = user_message.replace(' И ', ' и ').split(' и ')
+    if ' и ' in text.lower():
+        parts = re.split(r'\s+и\s+', text, flags=re.IGNORECASE)
         if len(parts) == 2:
             try:
                 # Парсим первую дату
@@ -149,21 +143,22 @@ def handle_message(update, context):
                 response += '⏳ Пожалуйста, подождите...\n'
                 response += 'Готовлю для вас подробный анализ совместимости!'
                 
-                update.message.reply_text(response)
+                bot.send_message(chat_id=chat_id, text=response)
                 return
                 
             except (ValueError, IndexError):
-                update.message.reply_text(
+                response = (
                     '❌ Неправильный формат дат.\n'
                     'Используйте формат: ДД.ММ.ГГГГ и ДД.ММ.ГГГГ\n'
                     'Например: 15.03.1990 и 22.07.1985'
                 )
+                bot.send_message(chat_id=chat_id, text=response)
                 return
     
     # Обработка одной даты
-    if len(user_message.split('.')) == 3:
+    if len(text.split('.')) == 3:
         try:
-            day, month, year = map(int, user_message.split('.'))
+            day, month, year = map(int, text.split('.'))
             
             # Проверка валидности даты
             if not (1 <= day <= 31 and 1 <= month <= 12 and 1900 <= year <= 2024):
@@ -171,41 +166,47 @@ def handle_message(update, context):
             
             zodiac_sign = get_zodiac_sign(day, month)
             
-            response = f'📅 Ваша дата рождения: {user_message}\n'
+            response = f'📅 Ваша дата рождения: {text}\n'
             response += f'🌟 Ваш знак зодиака: {zodiac_sign}\n\n'
             response += '💡 Хотите узнать совместимость?\n'
             response += 'Используйте команду /compatibility\n'
             response += 'Или отправьте сразу две даты в формате:\n'
             response += '"15.03.1990 и 22.07.1985"'
             
-            update.message.reply_text(response)
+            bot.send_message(chat_id=chat_id, text=response)
         except ValueError:
-            update.message.reply_text(
+            response = (
                 '❌ Неправильный формат даты.\n'
                 'Пожалуйста, используйте формат ДД.ММ.ГГГГ\n'
                 'Например: 15.03.1990'
             )
+            bot.send_message(chat_id=chat_id, text=response)
     else:
-        update.message.reply_text(
+        response = (
             '❌ Неправильный формат.\n\n'
             '📝 Для одной даты: 15.03.1990\n'
             '💕 Для совместимости: 15.03.1990 и 22.07.1985\n'
             '📋 Или используйте команду /compatibility'
         )
-
-# Регистрация обработчиков
-dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(CommandHandler("compatibility", compatibility_command))
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+        bot.send_message(chat_id=chat_id, text=response)
 
 # Webhook endpoint
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
     """Обработка входящих обновлений через webhook"""
-    json_data = request.get_json()
-    update = Update.de_json(json_data, bot)
-    dispatcher.process_update(update)
-    return 'ok'
+    try:
+        json_data = request.get_json()
+        update = Update.de_json(json_data, bot)
+        
+        if update.message and update.message.text:
+            chat_id = update.message.chat_id
+            message_text = update.message.text
+            process_message(message_text, chat_id)
+        
+        return 'ok'
+    except Exception as e:
+        logger.error(f"Error processing update: {e}")
+        return 'error', 500
 
 @app.route('/')
 def index():
@@ -217,12 +218,15 @@ def health():
 
 @app.route('/set_webhook')
 def set_webhook():
-    """Установка webhook (вызовите этот URL один раз после деплоя)"""
-    if WEBHOOK_URL:
-        webhook_url = f"{WEBHOOK_URL}/{TOKEN}"
-        bot.set_webhook(url=webhook_url)
-        return f'Webhook set to {webhook_url}'
-    return 'WEBHOOK_URL not set'
+    """Установка webhook"""
+    try:
+        if WEBHOOK_URL:
+            webhook_url = f"{WEBHOOK_URL}/{TOKEN}"
+            bot.set_webhook(url=webhook_url)
+            return f'Webhook set to {webhook_url}'
+        return 'WEBHOOK_URL not set'
+    except Exception as e:
+        return f'Error setting webhook: {e}'
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 8000))
