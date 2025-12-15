@@ -51,6 +51,12 @@ bot = Bot(token=TOKEN)
 # Хранилище данных пользователей
 user_data = {}
 
+def is_premium(chat_id):
+    return user_data.get(chat_id, {}).get("premium", False)
+
+# ===== TEST MODE =====
+TEST_MODE = True  # ← False, когда будешь включать реальные оплаты
+
 def run_async(func):
     """Декоратор для запуска асинхронных функций"""
     @wraps(func)
@@ -568,7 +574,7 @@ def handle_profile_analysis(chat_id, date):
 
 
 
-def handle_premium(chat_id):
+def handle_premium(chat_id):   
     """Создание счета для оплаты"""
     title = "AstroHarmony Premium"
     description = "Подписка на Premium версию на 30 дней с полным доступом ко всем функциям"
@@ -595,7 +601,17 @@ def handle_premium(chat_id):
         logger.error(f"Error creating invoice: {e}")
         send_message(chat_id, "❌ Ошибка создания счета. Попробуйте позже или напишите в поддержку: /feedback")
 
-    
+    def handle_free_premium(chat_id):
+    if chat_id not in user_data:
+        user_data[chat_id] = {}
+
+    user_data[chat_id]["premium"] = True
+
+    send_message(
+        chat_id,
+        "🧪 ТЕСТОВЫЙ РЕЖИМ\n\n"
+        "🎉 Premium активирован БЕСПЛАТНО и НАВСЕГДА.\n"
+        "Ты можешь спокойно тестировать все функции 💎")
 def handle_feedback(chat_id):
     """Обратная связь"""
     response = (
@@ -642,6 +658,9 @@ def process_message(message_text, chat_id):
     elif text == '/profile':
         handle_profile(chat_id)
         return
+    elif text == '/free_premium':
+    handle_free_premium(chat_id)
+    return
     elif text == '/premium':
         handle_premium(chat_id)
         return
