@@ -563,26 +563,36 @@ def handle_profile_analysis(chat_id, date):
     except Exception as e:
         send_message(chat_id, "❌ Неверный формат даты")
 
-def handle_premium(chat_id):
-    """Информация о Premium"""
-    response = (
-        '💎 AstroHarmony Premium\n\n'
-        '✨ Что включено:\n\n'
-        '📊 Полные детальные отчеты (в 3-5 раз больше информации)\n'
-        '🔮 Персональные прогнозы на месяц/год\n'
-        '💕 Детальная синастрия с домами и аспектами\n'
-        '🎴 Расклады Таро на 3/7/10 карт\n'
-        '📈 Транзиты и прогрессии\n'
-        '🌙 Анализ Луны, Асцендента и всех планет\n'
-        '⚡ Приоритетная поддержка\n'
-        '🚀 Без ограничений по запросам\n\n'
-        '💰 Цена: 990₽/месяц\n\n'
-        '📞 Для покупки напишите:\n'
-        '@astroharmony_support\n\n'
-        'Или отправьте /feedback'
-    )
-    send_message(chat_id, response)
 
+
+def handle_premium(chat_id):
+    """Создание счета для оплаты"""
+    title = "AstroHarmony Premium"
+    description = "Подписка на Premium версию на 30 дней с полным доступом ко всем функциям"
+    payload = f"premium_subscription_{chat_id}"
+    currency = "XTR"  # Telegram Stars
+    prices = [LabeledPrice("Premium подписка", 150)]  # 150 Stars
+    
+    try:
+        @run_async
+        async def send_inv():
+            await bot.send_invoice(
+                chat_id=chat_id,
+                title=title,
+                description=description,
+                payload=payload,
+                provider_token="",  # Пустая строка для Stars
+                currency=currency,
+                prices=prices
+            )
+        
+        send_inv()
+        
+    except Exception as e:
+        logger.error(f"Error creating invoice: {e}")
+        send_message(chat_id, "❌ Ошибка создания счета. Попробуйте позже или напишите в поддержку: /feedback")
+
+    
 def handle_feedback(chat_id):
     """Обратная связь"""
     response = (
