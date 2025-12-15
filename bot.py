@@ -2,6 +2,9 @@ import os
 import logging
 from flask import Flask, request
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+
+from telegram import LabeledPrice, PreCheckoutQuery
+
 import re
 import asyncio
 from functools import wraps
